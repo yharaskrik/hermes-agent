@@ -227,7 +227,7 @@ class BaseEnvironment(ABC):
     implement ``_run_bash()`` and ``cleanup()``; the base provides ``execute()`` with
     snapshot sourcing, CWD tracking, interrupt handling and timeout enforcement."""
 
-    # Subclasses that embed stdin as a heredoc (Modal, Daytona) set this.
+    # Subclasses that embed stdin in the command string (Modal, Daytona, Vercel) set this.
     _stdin_mode: str = "pipe"  # "pipe" or "heredoc"
 
     # True only when commands execute on the SAME host as the Hermes process
@@ -421,9 +421,16 @@ class BaseEnvironment(ABC):
 
     @staticmethod
     def _embed_stdin_heredoc(command: str, stdin_data: str) -> str:
-        """Append stdin_data as a shell heredoc to the command string (SDK backends)."""
-        delimiter = f"HERMES_STDIN_{uuid.uuid4().hex[:12]}"
-        return f"{command} << '{delimiter}'\n{stdin_data}\n{delimiter}"
+        """Embed stdin_data in the command string (SDK backends), byte-exact.
+
+        A trailing heredoc redirected only the LAST command of a ``;`` list, so the
+        ``cat > "$tmp"`` inside ``_atomic_write``'s one-line script read an empty stdin,
+        and it always appended a newline. Grouping the whole command and feeding a
+        single-quoted ``printf`` delivers the exact bytes to every command in it. The
+        process substitution keeps the group in the current shell, so ``cd``/``export``
+        still reach the wrapper's cwd/env re-dump; every heredoc backend runs ``bash -c``.
+        """
+        return f"{{ {command}\n}} < <(printf '%s' {shlex.quote(stdin_data)})"
 
     # --- Process lifecycle ---
     def _wait_for_process(

@@ -4,6 +4,7 @@ Tests _wrap_command(), _extract_cwd_from_output(), _embed_stdin_heredoc(),
 init_session() failure handling, and the CWD marker contract.
 """
 
+import subprocess
 from unittest.mock import MagicMock
 
 import pytest
@@ -243,14 +244,36 @@ class TestExtractCwdFromOutput:
 
 class TestEmbedStdinHeredoc:
 
-    def test_unique_delimiter_each_call(self):
-        r1 = BaseEnvironment._embed_stdin_heredoc("cat", "data")
-        r2 = BaseEnvironment._embed_stdin_heredoc("cat", "data")
+    @staticmethod
+    def _run_wrapped(command: str) -> subprocess.CompletedProcess:
+        # _wrap_command_script hands the command to `eval` inside a bash script.
+        escaped = command.replace("'", "'\\''")
+        return subprocess.run(["bash", "-c", f"eval '{escaped}'"], stdin=subprocess.DEVNULL,
+                              capture_output=True, check=True)
 
-        # Extract delimiters
-        d1 = r1.split("'")[1]
-        d2 = r2.split("'")[1]
-        assert d1 != d2  # UUID-based, should be unique
+    @pytest.mark.parametrize("content", [
+        "hello\n",
+        "no trailing newline",
+        "it's 'quoted'\nHERMES_STDIN_x\nEOF\n$HOME `id` \\n\n\n",
+        "ünïcode ✓",
+    ])
+    def test_stdin_reaches_a_command_that_is_not_last_byte_exact(self, tmp_path, content):
+        """The shape of FileOperations._atomic_write: `cat` is followed by more commands."""
+        target = tmp_path / "out.txt"
+        script = (f'set -e; tmp="$(mktemp -p {tmp_path})"; trap \'rm -f "$tmp"\' EXIT; '
+                  f'cat > "$tmp"; mv -f "$tmp" {target}; trap - EXIT')
+
+        self._run_wrapped(BaseEnvironment._embed_stdin_heredoc(script, content))
+
+        assert target.read_bytes() == content.encode()
+
+    def test_command_runs_in_the_current_shell(self):
+        """cd/export inside the command must still reach the wrapper's cwd/env re-dump."""
+        command = BaseEnvironment._embed_stdin_heredoc("cd /; read -r X", "value")
+
+        result = self._run_wrapped(command + '; printf "%s %s" "$PWD" "$X"')
+
+        assert result.stdout == b"/ value"
 
 
 class TestInitSessionFailure:
